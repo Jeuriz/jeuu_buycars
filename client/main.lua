@@ -25,6 +25,14 @@ local function UpdatePlayerCache()
     end
 end
 
+-- Función para forzar actualización inmediata del cache
+local function ForceUpdatePlayerCache()
+    playerCache.ped = PlayerPedId()
+    playerCache.coords = GetEntityCoords(playerCache.ped)
+    playerCache.vehicle = GetVehiclePedIsIn(playerCache.ped, false)
+    playerCache.lastUpdate = GetGameTimer()
+end
+
 -- Función para formatear precio
 local function FormatPrice(price)
     local formatted = tostring(price)
@@ -402,6 +410,42 @@ local function SpawnAllVehicles()
     end
 end
 
+-- Función para refrescar el showroom después de regresar de prueba
+local function RefreshShowroomAfterTestDrive()
+    if Config.Debug then
+        print('Refreshing showroom after test drive...')
+    end
+    
+    -- Forzar actualización del cache
+    ForceUpdatePlayerCache()
+    
+    -- Esperar un momento para que el teletransporte se complete
+    CreateThread(function()
+        Wait(1000) -- Esperar 1 segundo
+        
+        -- Actualizar estado del área del showroom
+        isInShowroomArea = IsPlayerNearShowroom()
+        
+        if Config.Debug then
+            print(('Player is near showroom: %s'):format(tostring(isInShowroomArea)))
+        end
+        
+        -- Si está en el área del showroom, forzar spawning
+        if isInShowroomArea then
+            HandleDistanceSpawning()
+            
+            -- Notificación de debug
+            if Config.Debug then
+                lib.notify({
+                    title = 'Showroom',
+                    description = 'Vehículos recargados después de la prueba',
+                    type = 'inform'
+                })
+            end
+        end
+    end)
+end
+
 -- Events del cliente
 RegisterNetEvent('vehicleShowroom:startTestDriveClient', function(vehicleModel, routingBucket)
     -- Crear efecto de fade
@@ -491,6 +535,9 @@ RegisterNetEvent('vehicleShowroom:endTestDriveClient', function(originalCoords)
     
     -- Fade in
     DoScreenFadeIn(1000)
+    
+    -- Refrescar el showroom después del teletransporte
+    RefreshShowroomAfterTestDrive()
 end)
 
 -- Evento para mostrar confirmación de compra
@@ -502,30 +549,6 @@ RegisterNetEvent('vehicleShowroom:purchaseSuccess', function(vehicleLabel, price
         duration = 7000
     })
 end)
-
--- Comando para reiniciar showroom (solo para admins)
-RegisterCommand('refreshshowroom', function()
-    if QBCore.Functions.HasPermission('admin') then
-        CleanupAllVehicles()
-        Wait(1000)
-        SpawnAllVehicles()
-        QBCore.Functions.Notify(Config.Notifications.showroomRefresh, 'success')
-    else
-        QBCore.Functions.Notify('No tienes permisos para usar este comando', 'error')
-    end
-end)
-
--- Comando para finalizar prueba manualmente
-RegisterCommand('endtestdrive', function()
-    if testDriveActive then
-        EndTestDrive()
-    else
-        QBCore.Functions.Notify('No estás en una prueba de vehículo', 'error')
-    end
-end)
-
--- Keybind para finalizar prueba (F7)
-RegisterKeyMapping('endtestdrive', 'Finalizar Prueba de Vehículo', 'keyboard', 'F7')
 
 -- Inicialización
 CreateThread(function()
@@ -676,74 +699,5 @@ CreateThread(function()
         else
             Wait(2000) -- Reducir frecuencia cuando no hay prueba activa
         end
-    end
-end)
-
--- Comandos de debug optimizados para administradores
-RegisterCommand('showroomstatus', function()
-    if QBCore.Functions.HasPermission('admin') then
-        local spawnedCount = 0
-        local totalVehicles = #Config.Vehicles
-        
-        for i, state in pairs(vehicleStates) do
-            if state.spawned then
-                spawnedCount = spawnedCount + 1
-            end
-        end
-        
-        lib.notify({
-            title = 'Estado del Showroom',
-            description = ('Vehículos: %d/%d spawneados\nEn área: %s\nCache actualizado: %dms'):format(
-                spawnedCount, totalVehicles, 
-                isInShowroomArea and 'Sí' or 'No',
-                GetGameTimer() - playerCache.lastUpdate
-            ),
-            type = 'inform',
-            duration = 5000
-        })
-    else
-        QBCore.Functions.Notify('No tienes permisos para usar este comando', 'error')
-    end
-end)
-
-RegisterCommand('toggle3dtext', function()
-    if QBCore.Functions.HasPermission('admin') then
-        Config.Text3D.distance = Config.Text3D.distance > 0 and 0 or 3.0
-        local status = Config.Text3D.distance > 0 and 'activado' or 'desactivado'
-        QBCore.Functions.Notify(('Texto 3D %s'):format(status), 'primary')
-    else
-        QBCore.Functions.Notify('No tienes permisos para usar este comando', 'error')
-    end
-end)
-
-RegisterCommand('clearcache', function()
-    if QBCore.Functions.HasPermission('admin') then
-        playerCache = {
-            coords = vector3(0, 0, 0),
-            ped = 0,
-            vehicle = 0,
-            lastUpdate = 0
-        }
-        QBCore.Functions.Notify('Cache del jugador limpiado', 'success')
-    else
-        QBCore.Functions.Notify('No tienes permisos para usar este comando', 'error')
-    end
-end)
-
-RegisterCommand('forcespawnall', function()
-    if QBCore.Functions.HasPermission('admin') then
-        SpawnAllVehicles()
-        QBCore.Functions.Notify('Todos los vehículos han sido spawneados', 'success')
-    else
-        QBCore.Functions.Notify('No tienes permisos para usar este comando', 'error')
-    end
-end)
-
-RegisterCommand('forcedespawnall', function()
-    if QBCore.Functions.HasPermission('admin') then
-        CleanupAllVehicles()
-        QBCore.Functions.Notify('Todos los vehículos han sido despawneados', 'success')
-    else
-        QBCore.Functions.Notify('No tienes permisos para usar este comando', 'error')
     end
 end)
