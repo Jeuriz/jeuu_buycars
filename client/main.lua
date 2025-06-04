@@ -292,22 +292,6 @@ local function SpawnVehicle(index, vehicleData)
                 onSelect = function()
                     OpenPurchaseShop(vehicleData)
                 end
-            },
-            {
-                name = 'vehicle_info_' .. index,
-                icon = 'fas fa-info-circle',
-                label = '📋 Información Detallada',
-                distance = 3.0,
-                onSelect = function()
-                    lib.notify({
-                        title = vehicleData.label,
-                        description = ('Categoría: %s\nPrecio: %s\nModelo: %s'):format(
-                            vehicleData.category:upper(), FormatPrice(vehicleData.price), vehicleData.model:upper()
-                        ),
-                        type = 'inform',
-                        duration = 5000
-                    })
-                end
             }
         })
         
