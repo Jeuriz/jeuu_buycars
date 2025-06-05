@@ -1,7 +1,7 @@
 Config = {}
 
 -- Configuración general
-Config.Debug = false
+Config.Debug = true
 Config.TestDriveTime = 60 -- Tiempo en segundos para prueba
 Config.TestDriveLocation = vector4(-1000.0, -3000.0, 13.94, 0.0) -- Coordenadas de prueba
 

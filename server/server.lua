@@ -1,4 +1,37 @@
+-- Verificar dependencias al inicio
+local function CheckDependencies()
+    local requiredResources = {'qb-core', 'ox_lib', 'ox_target'}
+    
+    for _, resource in ipairs(requiredResources) do
+        local state = GetResourceState(resource)
+        if state ~= 'started' then
+            print('^1[Vehicle Showroom] ERROR: Dependency ' .. resource .. ' is not started (State: ' .. state .. ')^7')
+            return false
+        end
+    end
+    
+    return true
+end
+
+-- Verificar dependencias antes de continuar
+if not CheckDependencies() then
+    print('^1[Vehicle Showroom] CRITICAL: Missing dependencies. Resource will not function properly.^7')
+end
+
+-- Verificar que ox_lib esté disponible
+if not lib then
+    print('^1[Vehicle Showroom] ERROR: ox_lib not loaded properly^7')
+    return
+end
+
 local QBCore = exports['qb-core']:GetCoreObject()
+
+-- Verificar que QBCore esté disponible
+if not QBCore then
+    print('^1[Vehicle Showroom] ERROR: QBCore not loaded properly^7')
+    return
+end
+
 local testDriveData = {}
 
 -- Sistema global de vehículos spawneados (sincronizado)
@@ -135,15 +168,20 @@ function SpawnAllShowroomVehicles()
             SetVehicleWindowTint(vehicle, 1)
             SetVehicleColours(vehicle, 0, 0)
             
+            -- Forzar sincronización de red
+            local netId = NetworkGetNetworkIdFromEntity(vehicle)
+            SetNetworkIdExistsOnAllMachines(netId, true)
+            SetNetworkIdCanMigrate(netId, false)
+            
             -- Guardar referencia global
             globalSpawnedVehicles[i] = {
                 entity = vehicle,
-                netId = NetworkGetNetworkIdFromEntity(vehicle),
+                netId = netId,
                 data = vehicleData
             }
             
             if Config.Debug then
-                print(('Spawned vehicle %s (NetID: %d)'):format(vehicleData.model, NetworkGetNetworkIdFromEntity(vehicle)))
+                print(('Spawned vehicle %s (NetID: %d)'):format(vehicleData.model, netId))
             end
         else
             if Config.Debug then
@@ -152,8 +190,17 @@ function SpawnAllShowroomVehicles()
         end
     end
     
-    -- Notificar a todos los clientes que los vehículos están listos
-    TriggerClientEvent('vehicleShowroom:vehiclesSpawned', -1, globalSpawnedVehicles)
+    -- Esperar un momento para que se sincronicen las entidades
+    CreateThread(function()
+        Wait(1500)
+        
+        -- Notificar a todos los clientes que los vehículos están listos
+        TriggerClientEvent('vehicleShowroom:vehiclesSpawned', -1, globalSpawnedVehicles)
+        
+        if Config.Debug then
+            print(('Notified clients about %d spawned vehicles'):format(#globalSpawnedVehicles))
+        end
+    end)
 end
 
 -- Función para despawnear todos los vehículos del showroom
@@ -180,177 +227,200 @@ function DespawnAllShowroomVehicles()
     globalSpawnedVehicles = {}
 end
 
+-- CALLBACKS REGISTRADOS CON VERIFICACIÓN DE ERRORES
+
 -- Callback para obtener estado actual de vehículos
-lib.callback.register('vehicleShowroom:getVehicleState', function(source)
-    return globalSpawnedVehicles
+local callbackSuccess = pcall(function()
+    lib.callback.register('vehicleShowroom:getVehicleState', function(source)
+        if Config.Debug then
+            print(('Player %d requested vehicle state - returning %d vehicles'):format(source, #globalSpawnedVehicles))
+        end
+        return globalSpawnedVehicles
+    end)
 end)
+
+if not callbackSuccess then
+    print('^1[Vehicle Showroom] ERROR: Failed to register getVehicleState callback^7')
+end
 
 -- Callback para iniciar prueba de vehículo usando ox_lib
-lib.callback.register('vehicleShowroom:startTestDrive', function(source, vehicleModel)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    
-    if not Player then 
-        return false, 'Error: Jugador no encontrado'
-    end
-    
-    -- Verificar si ya está en prueba
-    if testDriveData[src] then
-        return false, Config.Notifications.alreadyTesting
-    end
-    
-    -- Verificar que el vehículo sea válido
-    local isValid, vehicleConfig = IsValidVehicle(vehicleModel)
-    if not isValid then
-        return false, Config.Notifications.invalidVehicle
-    end
-    
-    -- Obtener coordenadas actuales
-    local ped = GetPlayerPed(src)
-    local coords = GetEntityCoords(ped)
-    local heading = GetEntityHeading(ped)
-    
-    -- Crear nuevo routing bucket (solo si la función existe)
-    local bucket = 0
-    local originalBucket = 0
-    local useRoutingBucket = false
-    
-    if GetPlayerRoutingBucket and SetPlayerRoutingBucket then
-        useRoutingBucket = true
-        bucket = GetFreeRoutingBucket()
-        originalBucket = GetPlayerRoutingBucket(src)
-        SetPlayerRoutingBucket(src, bucket)
-    end
-    
-    -- Guardar datos de la prueba
-    testDriveData[src] = {
-        originalBucket = originalBucket,
-        originalCoords = {x = coords.x, y = coords.y, z = coords.z, w = heading},
-        bucket = bucket,
-        vehicleModel = vehicleModel,
-        startTime = os.time(),
-        useRoutingBucket = useRoutingBucket
-    }
-    
-    -- Iniciar prueba en cliente
-    TriggerClientEvent('vehicleShowroom:startTestDriveClient', src, vehicleModel, bucket)
-    
-    if Config.Debug then
-        if useRoutingBucket then
-            print(('Player %s started test drive with %s in bucket %d'):format(src, vehicleModel, bucket))
-        else
-            print(('Player %s started test drive with %s (no routing bucket support)'):format(src, vehicleModel))
+local testDriveCallbackSuccess = pcall(function()
+    lib.callback.register('vehicleShowroom:startTestDrive', function(source, vehicleModel)
+        local src = source
+        local Player = QBCore.Functions.GetPlayer(src)
+        
+        if not Player then 
+            return false, 'Error: Jugador no encontrado'
         end
-    end
-    
-    -- Log para administradores
-    TriggerEvent('qb-log:server:CreateLog', 'vehicleshowroom', 'Test Drive Started', 'green', 
-        ('**%s** started test driving **%s**'):format(Player.PlayerData.name, vehicleConfig.label))
-    
-    return true, 'Prueba iniciada correctamente'
-end)
-
--- Callback para comprar vehículo usando ox_lib
-lib.callback.register('vehicleShowroom:buyVehicle', function(source, vehicleData)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    
-    if not Player then 
-        return false, 'Error: Jugador no encontrado'
-    end
-    
-    -- Verificar que el vehículo existe en la configuración
-    local vehicleExists = false
-    local vehicleConfig = nil
-    
-    for _, veh in ipairs(Config.Vehicles) do
-        if veh.model == vehicleData.model then
-            vehicleExists = true
-            vehicleConfig = veh
-            break
+        
+        -- Verificar si ya está en prueba
+        if testDriveData[src] then
+            return false, Config.Notifications.alreadyTesting
         end
-    end
-    
-    if not vehicleExists then
-        return false, Config.Notifications.invalidVehicle
-    end
-    
-    -- Verificar dinero en efectivo
-    local cash = Player.PlayerData.money['cash']
-    
-    if cash < vehicleData.price then
-        return false, Config.Notifications.notEnoughMoney
-    end
-    
-    -- Verificar que el ítem existe en qb-core
-    local itemData = QBCore.Shared.Items[vehicleConfig.item]
-    if not itemData then
+        
+        -- Verificar que el vehículo sea válido
+        local isValid, vehicleConfig = IsValidVehicle(vehicleModel)
+        if not isValid then
+            return false, Config.Notifications.invalidVehicle
+        end
+        
+        -- Obtener coordenadas actuales
+        local ped = GetPlayerPed(src)
+        local coords = GetEntityCoords(ped)
+        local heading = GetEntityHeading(ped)
+        
+        -- Crear nuevo routing bucket (solo si la función existe)
+        local bucket = 0
+        local originalBucket = 0
+        local useRoutingBucket = false
+        
+        if GetPlayerRoutingBucket and SetPlayerRoutingBucket then
+            useRoutingBucket = true
+            bucket = GetFreeRoutingBucket()
+            originalBucket = GetPlayerRoutingBucket(src)
+            SetPlayerRoutingBucket(src, bucket)
+        end
+        
+        -- Guardar datos de la prueba
+        testDriveData[src] = {
+            originalBucket = originalBucket,
+            originalCoords = {x = coords.x, y = coords.y, z = coords.z, w = heading},
+            bucket = bucket,
+            vehicleModel = vehicleModel,
+            startTime = os.time(),
+            useRoutingBucket = useRoutingBucket
+        }
+        
+        -- Iniciar prueba en cliente
+        TriggerClientEvent('vehicleShowroom:startTestDriveClient', src, vehicleModel, bucket)
+        
         if Config.Debug then
-            print(('Item %s not found in QBCore.Shared.Items'):format(vehicleConfig.item))
-        end
-        return false, 'Error: Ítem del vehículo no configurado correctamente'
-    end
-    
-    -- Verificar si ya tiene este vehículo
-    local hasItem = Player.Functions.GetItemByName(vehicleConfig.item)
-    if hasItem then
-        return false, 'Ya tienes este vehículo en tu inventario'
-    end
-    
-    -- Verificar espacio en inventario
-    local totalWeight = 0
-    for _, item in pairs(Player.PlayerData.items) do
-        if item then
-            totalWeight = totalWeight + (item.weight * item.amount)
-        end
-    end
-    
-    if totalWeight + itemData.weight > Player.PlayerData.maxweight then
-        return false, 'No tienes espacio suficiente en el inventario'
-    end
-    
-    -- Remover dinero
-    Player.Functions.RemoveMoney('cash', vehicleData.price, 'vehicle-showroom-purchase')
-    
-    -- Generar metadata para el ítem del vehículo
-    local metadata = {
-        vehicle = vehicleData.model,
-        label = vehicleData.label,
-        category = vehicleData.category,
-        purchaseDate = os.date('%Y-%m-%d %H:%M:%S'),
-        buyer = Player.PlayerData.name,
-        citizenid = Player.PlayerData.citizenid,
-        price = vehicleData.price
-    }
-    
-    -- Añadir ítem del vehículo al inventario
-    local itemAdded = Player.Functions.AddItem(vehicleConfig.item, 1, false, metadata)
-    
-    if itemAdded then
-        if Config.Debug then
-            print(('Player %s bought %s for $%d (Item: %s)'):format(src, vehicleData.model, vehicleData.price, vehicleConfig.item))
+            if useRoutingBucket then
+                print(('Player %s started test drive with %s in bucket %d'):format(src, vehicleModel, bucket))
+            else
+                print(('Player %s started test drive with %s (no routing bucket support)'):format(src, vehicleModel))
+            end
         end
         
         -- Log para administradores
-        TriggerEvent('qb-log:server:CreateLog', 'vehicleshowroom', 'Vehicle Purchase', 'blue', 
-            ('**%s** purchased **%s** for **$%d**'):format(Player.PlayerData.name, vehicleData.label, vehicleData.price))
+        TriggerEvent('qb-log:server:CreateLog', 'vehicleshowroom', 'Test Drive Started', 'green', 
+            ('**%s** started test driving **%s**'):format(Player.PlayerData.name, vehicleConfig.label))
         
-        local successMessage = ('Has comprado un %s por $%d. Revisa tu inventario para encontrar el ítem: %s'):format(
-            vehicleData.label, vehicleData.price, vehicleConfig.item
-        )
+        return true, 'Prueba iniciada correctamente'
+    end)
+end)
+
+if not testDriveCallbackSuccess then
+    print('^1[Vehicle Showroom] ERROR: Failed to register startTestDrive callback^7')
+end
+
+-- Callback para comprar vehículo usando ox_lib
+local buyCallbackSuccess = pcall(function()
+    lib.callback.register('vehicleShowroom:buyVehicle', function(source, vehicleData)
+        local src = source
+        local Player = QBCore.Functions.GetPlayer(src)
         
-        return true, successMessage, vehicleConfig.item
-    else
-        -- Si falla al añadir el ítem, devolver el dinero
-        Player.Functions.AddMoney('cash', vehicleData.price, 'vehicle-showroom-refund')
-        
-        if Config.Debug then
-            print(('Failed to add item %s to player %s'):format(vehicleConfig.item, src))
+        if not Player then 
+            return false, 'Error: Jugador no encontrado'
         end
         
-        return false, 'Error al procesar la compra. Dinero devuelto.'
-    end
+        -- Verificar que el vehículo existe en la configuración
+        local vehicleExists = false
+        local vehicleConfig = nil
+        
+        for _, veh in ipairs(Config.Vehicles) do
+            if veh.model == vehicleData.model then
+                vehicleExists = true
+                vehicleConfig = veh
+                break
+            end
+        end
+        
+        if not vehicleExists then
+            return false, Config.Notifications.invalidVehicle
+        end
+        
+        -- Verificar dinero en efectivo
+        local cash = Player.PlayerData.money['cash']
+        
+        if cash < vehicleData.price then
+            return false, Config.Notifications.notEnoughMoney
+        end
+        
+        -- Verificar que el ítem existe en qb-core
+        local itemData = QBCore.Shared.Items[vehicleConfig.item]
+        if not itemData then
+            if Config.Debug then
+                print(('Item %s not found in QBCore.Shared.Items'):format(vehicleConfig.item))
+            end
+            return false, 'Error: Ítem del vehículo no configurado correctamente'
+        end
+        
+        -- Verificar si ya tiene este vehículo
+        local hasItem = Player.Functions.GetItemByName(vehicleConfig.item)
+        if hasItem then
+            return false, 'Ya tienes este vehículo en tu inventario'
+        end
+        
+        -- Verificar espacio en inventario
+        local totalWeight = 0
+        for _, item in pairs(Player.PlayerData.items) do
+            if item then
+                totalWeight = totalWeight + (item.weight * item.amount)
+            end
+        end
+        
+        if totalWeight + itemData.weight > Player.PlayerData.maxweight then
+            return false, 'No tienes espacio suficiente en el inventario'
+        end
+        
+        -- Remover dinero
+        Player.Functions.RemoveMoney('cash', vehicleData.price, 'vehicle-showroom-purchase')
+        
+        -- Generar metadata para el ítem del vehículo
+        local metadata = {
+            vehicle = vehicleData.model,
+            label = vehicleData.label,
+            category = vehicleData.category,
+            purchaseDate = os.date('%Y-%m-%d %H:%M:%S'),
+            buyer = Player.PlayerData.name,
+            citizenid = Player.PlayerData.citizenid,
+            price = vehicleData.price
+        }
+        
+        -- Añadir ítem del vehículo al inventario
+        local itemAdded = Player.Functions.AddItem(vehicleConfig.item, 1, false, metadata)
+        
+        if itemAdded then
+            if Config.Debug then
+                print(('Player %s bought %s for $%d (Item: %s)'):format(src, vehicleData.model, vehicleData.price, vehicleConfig.item))
+            end
+            
+            -- Log para administradores
+            TriggerEvent('qb-log:server:CreateLog', 'vehicleshowroom', 'Vehicle Purchase', 'blue', 
+                ('**%s** purchased **%s** for **$%d**'):format(Player.PlayerData.name, vehicleData.label, vehicleData.price))
+            
+            local successMessage = ('Has comprado un %s por $%d. Revisa tu inventario para encontrar el ítem: %s'):format(
+                vehicleData.label, vehicleData.price, vehicleConfig.item
+            )
+            
+            return true, successMessage, vehicleConfig.item
+        else
+            -- Si falla al añadir el ítem, devolver el dinero
+            Player.Functions.AddMoney('cash', vehicleData.price, 'vehicle-showroom-refund')
+            
+            if Config.Debug then
+                print(('Failed to add item %s to player %s'):format(vehicleConfig.item, src))
+            end
+            
+            return false, 'Error al procesar la compra. Dinero devuelto.'
+        end
+    end)
 end)
+
+if not buyCallbackSuccess then
+    print('^1[Vehicle Showroom] ERROR: Failed to register buyVehicle callback^7')
+end
 
 -- Event para finalizar prueba de vehículo
 RegisterNetEvent('vehicleShowroom:endTestDrive', function()
@@ -504,6 +574,25 @@ QBCore.Commands.Add('endtestdrive', 'Finalizar prueba de vehículo de un jugador
     TriggerEvent('vehicleShowroom:forceEndTestDrive', source, targetId)
 end)
 
+-- Comando de debug para verificar callbacks
+QBCore.Commands.Add('debugshowroom', 'Debug del showroom', {}, false, function(source)
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not QBCore.Functions.HasPermission(source, 'admin') then
+        TriggerClientEvent('QBCore:Notify', source, 'No tienes permisos para usar este comando', 'error')
+        return
+    end
+    
+    print('=== SHOWROOM SERVER DEBUG ===')
+    print(('QBCore loaded: %s'):format(tostring(QBCore ~= nil)))
+    print(('ox_lib loaded: %s'):format(tostring(lib ~= nil)))
+    print(('Spawned vehicles: %d'):format(#globalSpawnedVehicles))
+    print(('Players near showroom: %d'):format(#playersNearShowroom))
+    print(('Active test drives: %d'):format(#testDriveData))
+    print('=============================')
+    
+    TriggerClientEvent('QBCore:Notify', source, 'Debug info printed to server console', 'success')
+end)
+
 -- Thread principal para verificar jugadores cerca del showroom
 CreateThread(function()
     while true do
@@ -536,6 +625,23 @@ CreateThread(function()
     end
 end)
 
-print('^2[Vehicle Showroom] ^7Servidor cargado correctamente - HOTFIX aplicado')
-print('^3[Vehicle Showroom] ^7Sistema anti-duplicación activado')
-print('^3[Vehicle Showroom] ^7Vehículos configurados: ^2' .. #Config.Vehicles)
+-- Verificar callbacks al cargar
+CreateThread(function()
+    Wait(5000) -- Esperar 5 segundos después del inicio
+    
+    local callbacksWorking = true
+    
+    -- Verificar si los callbacks están registrados
+    if not lib.callback then
+        print('^1[Vehicle Showroom] ERROR: ox_lib callback system not available^7')
+        callbacksWorking = false
+    end
+    
+    if callbacksWorking then
+        print('^2[Vehicle Showroom] ^7Servidor cargado correctamente - Callbacks registrados')
+        print('^3[Vehicle Showroom] ^7Sistema anti-duplicación activado')
+        print('^3[Vehicle Showroom] ^7Vehículos configurados: ^2' .. #Config.Vehicles)
+    else
+        print('^1[Vehicle Showroom] ^7ERROR: Callbacks no pudieron registrarse - Revisa ox_lib^7')
+    end
+end)

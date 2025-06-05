@@ -167,15 +167,23 @@ local function StartTestDrive(vehicleModel)
     
     testDriveActive = true
     
-    -- Usar ox_lib callback para mayor eficiencia
-    lib.callback('vehicleShowroom:startTestDrive', false, function(success, message)
-        if not success then
-            testDriveActive = false
-            if message then
-                QBCore.Functions.Notify(message, 'error')
+    -- Usar ox_lib callback con manejo de errores
+    local success, err = pcall(function()
+        lib.callback('vehicleShowroom:startTestDrive', false, function(callbackSuccess, message)
+            if not callbackSuccess then
+                testDriveActive = false
+                if message then
+                    QBCore.Functions.Notify(message, 'error')
+                end
             end
-        end
-    end, vehicleModel)
+        end, vehicleModel)
+    end)
+    
+    if not success then
+        testDriveActive = false
+        print('^1[Vehicle Showroom Client] ERROR: StartTestDrive callback failed - ' .. tostring(err) .. '^7')
+        QBCore.Functions.Notify('Error al conectar con el servidor. Inténtalo de nuevo.', 'error')
+    end
 end
 
 -- Función para abrir tienda de compra con mejor UX
@@ -200,19 +208,26 @@ local function OpenPurchaseShop(vehicleData)
                 icon = 'dollar-sign',
                 iconColor = '#10B981',
                 onSelect = function()
-                    -- Usar callback para la compra
-                    lib.callback('vehicleShowroom:buyVehicle', false, function(success, message, itemName)
-                        if success then
-                            lib.notify({
-                                title = '✅ Compra Exitosa',
-                                description = message,
-                                type = 'success',
-                                duration = 7000
-                            })
-                        else
-                            QBCore.Functions.Notify(message, 'error')
-                        end
-                    end, vehicleData)
+                    -- Usar callback con manejo de errores
+                    local success, err = pcall(function()
+                        lib.callback('vehicleShowroom:buyVehicle', false, function(callbackSuccess, message, itemName)
+                            if callbackSuccess then
+                                lib.notify({
+                                    title = '✅ Compra Exitosa',
+                                    description = message,
+                                    type = 'success',
+                                    duration = 7000
+                                })
+                            else
+                                QBCore.Functions.Notify(message, 'error')
+                            end
+                        end, vehicleData)
+                    end)
+                    
+                    if not success then
+                        print('^1[Vehicle Showroom Client] ERROR: BuyVehicle callback failed - ' .. tostring(err) .. '^7')
+                        QBCore.Functions.Notify('Error al conectar con el servidor. Inténtalo de nuevo.', 'error')
+                    end
                 end
             },
             {
@@ -371,25 +386,41 @@ end
 
 -- MEJORADA: Función para sincronizar estado con el servidor al entrar
 local function SyncWithServer()
-    lib.callback('vehicleShowroom:getVehicleState', false, function(serverVehicles)
-        if serverVehicles and next(serverVehicles) ~= nil then
-            showroomVehicles = serverVehicles
-            
-            if Config.Debug then
-                print(('Received %d vehicles from server, setting up targets...'):format(#serverVehicles))
+    -- Añadir manejo de errores para el callback
+    local success, err = pcall(function()
+        lib.callback('vehicleShowroom:getVehicleState', false, function(serverVehicles)
+            if serverVehicles and next(serverVehicles) ~= nil then
+                showroomVehicles = serverVehicles
+                
+                if Config.Debug then
+                    print(('Received %d vehicles from server, setting up targets...'):format(#serverVehicles))
+                end
+                
+                -- Configurar targets inmediatamente (la función ahora maneja la sincronización internamente)
+                SetupVehicleTargets()
+            else
+                showroomVehicles = {}
+                ClearVehicleTargets()
+                
+                if Config.Debug then
+                    print('No vehicles received from server')
+                end
             end
-            
-            -- Configurar targets inmediatamente (la función ahora maneja la sincronización internamente)
-            SetupVehicleTargets()
-        else
-            showroomVehicles = {}
-            ClearVehicleTargets()
-            
-            if Config.Debug then
-                print('No vehicles received from server')
-            end
-        end
+        end)
     end)
+    
+    if not success then
+        print('^1[Vehicle Showroom Client] ERROR: Failed to sync with server - ' .. tostring(err) .. '^7')
+        
+        -- Reintentar después de 5 segundos
+        CreateThread(function()
+            Wait(5000)
+            if Config.Debug then
+                print('[Vehicle Showroom Client] Retrying server sync...')
+            end
+            SyncWithServer()
+        end)
+    end
 end
 
 -- Events del cliente
@@ -531,6 +562,42 @@ RegisterNetEvent('vehicleShowroom:purchaseSuccess', function(vehicleLabel, price
         duration = 7000
     })
 end)
+
+-- Comando de debug para probar
+RegisterCommand('checkshowroom', function()
+    print('=== SHOWROOM CLIENT DEBUG ===')
+    print(('QBCore loaded: %s'):format(tostring(QBCore ~= nil)))
+    print(('ox_lib loaded: %s'):format(tostring(lib ~= nil)))
+    print(('ox_target available: %s'):format(tostring(exports.ox_target ~= nil)))
+    print(('testDriveActive: %s'):format(tostring(testDriveActive)))
+    print(('isInShowroomArea: %s'):format(tostring(isInShowroomArea)))
+    print(('Vehicles in showroomVehicles: %d'):format(#showroomVehicles))
+    
+    for i, vehicleInfo in pairs(showroomVehicles) do
+        local entity = NetworkGetEntityFromNetworkId(vehicleInfo.netId)
+        local exists = DoesEntityExist(entity)
+        local model = exists and GetEntityModel(entity) or 0
+        
+        print(('Vehicle %d: NetID=%d, Entity=%d, Exists=%s, Model=%d'):format(
+            i, vehicleInfo.netId, entity, tostring(exists), model))
+    end
+    
+    print(('Targets configured: %d'):format(#vehicleTargets))
+    print('=============================')
+    
+    -- Probar callback
+    local success, err = pcall(function()
+        lib.callback('vehicleShowroom:getVehicleState', false, function(result)
+            print(('Callback test result: %s vehicles'):format(result and #result or 'nil'))
+        end)
+    end)
+    
+    if not success then
+        print('^1Callback test failed: ' .. tostring(err) .. '^7')
+    else
+        print('^2Callback test successful^7')
+    end
+end, false)
 
 -- Inicialización
 CreateThread(function()
