@@ -17,6 +17,7 @@ local playerCache = {
 -- Declaración forward de funciones
 local ClearVehicleTargets
 local SetupVehicleTargets
+local WaitForVehicleSync
 
 -- Función para actualizar cache del jugador
 local function UpdatePlayerCache()
@@ -235,6 +236,34 @@ local function OpenPurchaseShop(vehicleData)
     lib.showContext('vehicle_purchase')
 end
 
+-- NUEVA: Función para esperar a que el vehículo se sincronice completamente
+WaitForVehicleSync = function(netId, maxAttempts)
+    maxAttempts = maxAttempts or 50 -- 10 segundos máximo (50 * 200ms)
+    local attempts = 0
+    
+    return CreateThread(function()
+        while attempts < maxAttempts do
+            local entity = NetworkGetEntityFromNetworkId(netId)
+            
+            -- Verificar que la entidad existe Y está completamente sincronizada
+            if DoesEntityExist(entity) and NetworkHasControlOfEntity(entity) then
+                if Config.Debug then
+                    print(('Vehicle synced after %d attempts (NetID: %d)'):format(attempts, netId))
+                end
+                return entity
+            end
+            
+            attempts = attempts + 1
+            Wait(200) -- Esperar 200ms entre intentos
+        end
+        
+        if Config.Debug then
+            print(('Failed to sync vehicle after %d attempts (NetID: %d)'):format(maxAttempts, netId))
+        end
+        return nil
+    end)
+end
+
 -- Función para limpiar targets de vehículos
 ClearVehicleTargets = function()
     for i, entity in pairs(vehicleTargets) do
@@ -249,45 +278,79 @@ ClearVehicleTargets = function()
     end
 end
 
--- Función para configurar targets de vehículos sincronizados
+-- MEJORADA: Función para configurar targets de vehículos con mejor sincronización
 SetupVehicleTargets = function()
     -- Limpiar targets existentes
     ClearVehicleTargets()
     
+    if Config.Debug then
+        print(('Setting up targets for %d vehicles'):format(#showroomVehicles))
+    end
+    
     for i, vehicleInfo in pairs(showroomVehicles) do
         if vehicleInfo and vehicleInfo.netId then
-            local entity = NetworkGetEntityFromNetworkId(vehicleInfo.netId)
-            
-            if DoesEntityExist(entity) then
-                -- Configurar targets para este vehículo
-                exports.ox_target:addLocalEntity(entity, {
-                    {
-                        name = 'test_drive_' .. i,
-                        icon = 'fas fa-car',
-                        label = ('🚗 Probar %s'):format(vehicleInfo.data.label),
-                        distance = 3.0,
-                        onSelect = function()
-                            StartTestDrive(vehicleInfo.data.model)
-                        end
-                    },
-                    {
-                        name = 'buy_vehicle_' .. i,
-                        icon = 'fas fa-dollar-sign',
-                        label = ('💰 Comprar %s'):format(FormatPrice(vehicleInfo.data.price)),
-                        distance = 3.0,
-                        onSelect = function()
-                            OpenPurchaseShop(vehicleInfo.data)
-                        end
-                    }
-                })
+            -- Usar la nueva función de sincronización
+            CreateThread(function()
+                local entity = nil
+                local attempts = 0
+                local maxAttempts = 25 -- 5 segundos máximo
                 
-                -- Guardar referencia del target
-                vehicleTargets[i] = entity
-                
-                if Config.Debug then
-                    print(('Configured targets for vehicle %s (NetID: %d)'):format(vehicleInfo.data.model, vehicleInfo.netId))
+                -- Bucle para esperar sincronización
+                while attempts < maxAttempts do
+                    entity = NetworkGetEntityFromNetworkId(vehicleInfo.netId)
+                    
+                    -- Verificar múltiples condiciones para asegurar sincronización completa
+                    if DoesEntityExist(entity) and 
+                       NetworkDoesEntityExistWithNetworkId(vehicleInfo.netId) and
+                       GetEntityModel(entity) ~= 0 then
+                        
+                        -- Esperar un frame adicional para asegurar
+                        Wait(100)
+                        break
+                    end
+                    
+                    attempts = attempts + 1
+                    Wait(200)
                 end
-            end
+                
+                -- Si la entidad existe y está sincronizada, configurar targets
+                if entity and DoesEntityExist(entity) then
+                    -- Configurar targets para este vehículo
+                    exports.ox_target:addLocalEntity(entity, {
+                        {
+                            name = 'test_drive_' .. i,
+                            icon = 'fas fa-car',
+                            label = ('🚗 Probar %s'):format(vehicleInfo.data.label),
+                            distance = 3.0,
+                            onSelect = function()
+                                StartTestDrive(vehicleInfo.data.model)
+                            end
+                        },
+                        {
+                            name = 'buy_vehicle_' .. i,
+                            icon = 'fas fa-dollar-sign',
+                            label = ('💰 Comprar %s'):format(FormatPrice(vehicleInfo.data.price)),
+                            distance = 3.0,
+                            onSelect = function()
+                                OpenPurchaseShop(vehicleInfo.data)
+                            end
+                        }
+                    })
+                    
+                    -- Guardar referencia del target
+                    vehicleTargets[i] = entity
+                    
+                    if Config.Debug then
+                        print(('✅ Target configured for %s (NetID: %d, Entity: %d) after %d attempts'):format(
+                            vehicleInfo.data.model, vehicleInfo.netId, entity, attempts))
+                    end
+                else
+                    if Config.Debug then
+                        print(('❌ Failed to sync vehicle %s (NetID: %d) after %d attempts'):format(
+                            vehicleInfo.data.model, vehicleInfo.netId, maxAttempts))
+                    end
+                end
+            end)
         end
     end
 end
@@ -306,24 +369,25 @@ local function IsPlayerNearShowroom()
     return false
 end
 
--- Función para sincronizar estado con el servidor al entrar
+-- MEJORADA: Función para sincronizar estado con el servidor al entrar
 local function SyncWithServer()
     lib.callback('vehicleShowroom:getVehicleState', false, function(serverVehicles)
         if serverVehicles and next(serverVehicles) ~= nil then
             showroomVehicles = serverVehicles
             
-            -- Esperar un momento para que las entidades se sincronicen
-            CreateThread(function()
-                Wait(2000) -- Esperar 2 segundos
-                SetupVehicleTargets()
-                
-                if Config.Debug then
-                    print(('Synced with server - received %d vehicles'):format(table.getn(serverVehicles)))
-                end
-            end)
+            if Config.Debug then
+                print(('Received %d vehicles from server, setting up targets...'):format(#serverVehicles))
+            end
+            
+            -- Configurar targets inmediatamente (la función ahora maneja la sincronización internamente)
+            SetupVehicleTargets()
         else
             showroomVehicles = {}
             ClearVehicleTargets()
+            
+            if Config.Debug then
+                print('No vehicles received from server')
+            end
         end
     end)
 end
@@ -332,19 +396,20 @@ end
 RegisterNetEvent('vehicleShowroom:vehiclesSpawned', function(serverVehicles)
     showroomVehicles = serverVehicles
     
-    -- Configurar targets después de un breve delay para sincronización
-    CreateThread(function()
-        Wait(2000) -- Esperar 2 segundos para que las entidades se sincronicen
-        SetupVehicleTargets()
-        
-        if Config.Debug then
-            lib.notify({
-                title = 'Showroom',
-                description = Config.Notifications.showroomEntered,
-                type = 'inform'
-            })
-        end
-    end)
+    if Config.Debug then
+        print(('Vehicles spawned event received - %d vehicles'):format(#serverVehicles))
+    end
+    
+    -- Configurar targets (la función ahora maneja la sincronización internamente)
+    SetupVehicleTargets()
+    
+    if Config.Debug then
+        lib.notify({
+            title = 'Showroom',
+            description = Config.Notifications.showroomEntered,
+            type = 'inform'
+        })
+    end
 end)
 
 RegisterNetEvent('vehicleShowroom:vehiclesDespawned', function()
@@ -352,6 +417,7 @@ RegisterNetEvent('vehicleShowroom:vehiclesDespawned', function()
     showroomVehicles = {}
     
     if Config.Debug then
+        print('Vehicles despawned - targets cleared')
         lib.notify({
             title = 'Showroom',
             description = Config.Notifications.showroomExited,
