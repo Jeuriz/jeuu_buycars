@@ -1,43 +1,16 @@
--- Verificar dependencias al inicio
-local function CheckDependencies()
-    local requiredResources = {'qb-core', 'ox_lib', 'ox_target'}
-    
-    for _, resource in ipairs(requiredResources) do
-        local state = GetResourceState(resource)
-        if state ~= 'started' then
-            print('^1[Vehicle Showroom] ERROR: Dependency ' .. resource .. ' is not started (State: ' .. state .. ')^7')
-            return false
-        end
-    end
-    
-    return true
-end
-
--- Verificar dependencias antes de continuar
-if not CheckDependencies() then
-    print('^1[Vehicle Showroom] CRITICAL: Missing dependencies. Resource will not function properly.^7')
-end
-
--- Verificar que ox_lib esté disponible
-if not lib then
-    print('^1[Vehicle Showroom] ERROR: ox_lib not loaded properly^7')
-    return
-end
-
 local QBCore = exports['qb-core']:GetCoreObject()
-
--- Verificar que QBCore esté disponible
-if not QBCore then
-    print('^1[Vehicle Showroom] ERROR: QBCore not loaded properly^7')
-    return
-end
-
 local testDriveData = {}
 
 -- Sistema global de vehículos spawneados (sincronizado)
 local globalSpawnedVehicles = {}
 local playersNearShowroom = {}
 local lastDistanceCheck = 0
+
+-- HOTFIX: Asegurar que ox_lib esté cargado
+if not lib then
+    print('^1[Vehicle Showroom] ERROR: ox_lib no está disponible')
+    return
+end
 
 -- Función para obtener un routing bucket libre
 local function GetFreeRoutingBucket()
@@ -168,20 +141,15 @@ function SpawnAllShowroomVehicles()
             SetVehicleWindowTint(vehicle, 1)
             SetVehicleColours(vehicle, 0, 0)
             
-            -- Forzar sincronización de red
-            local netId = NetworkGetNetworkIdFromEntity(vehicle)
-            SetNetworkIdExistsOnAllMachines(netId, true)
-            SetNetworkIdCanMigrate(netId, false)
-            
             -- Guardar referencia global
             globalSpawnedVehicles[i] = {
                 entity = vehicle,
-                netId = netId,
+                netId = NetworkGetNetworkIdFromEntity(vehicle),
                 data = vehicleData
             }
             
             if Config.Debug then
-                print(('Spawned vehicle %s (NetID: %d)'):format(vehicleData.model, netId))
+                print(('Spawned vehicle %s (NetID: %d)'):format(vehicleData.model, NetworkGetNetworkIdFromEntity(vehicle)))
             end
         else
             if Config.Debug then
@@ -190,17 +158,8 @@ function SpawnAllShowroomVehicles()
         end
     end
     
-    -- Esperar un momento para que se sincronicen las entidades
-    CreateThread(function()
-        Wait(1500)
-        
-        -- Notificar a todos los clientes que los vehículos están listos
-        TriggerClientEvent('vehicleShowroom:vehiclesSpawned', -1, globalSpawnedVehicles)
-        
-        if Config.Debug then
-            print(('Notified clients about %d spawned vehicles'):format(#globalSpawnedVehicles))
-        end
-    end)
+    -- Notificar a todos los clientes que los vehículos están listos
+    TriggerClientEvent('vehicleShowroom:vehiclesSpawned', -1, globalSpawnedVehicles)
 end
 
 -- Función para despawnear todos los vehículos del showroom
@@ -227,24 +186,16 @@ function DespawnAllShowroomVehicles()
     globalSpawnedVehicles = {}
 end
 
--- CALLBACKS REGISTRADOS CON VERIFICACIÓN DE ERRORES
-
--- Callback para obtener estado actual de vehículos
-local callbackSuccess = pcall(function()
+-- HOTFIX: Registrar callbacks después de asegurar que ox_lib está disponible
+CreateThread(function()
+    Wait(1000) -- Esperar a que todo se cargue
+    
+    -- Callback para obtener estado actual de vehículos
     lib.callback.register('vehicleShowroom:getVehicleState', function(source)
-        if Config.Debug then
-            print(('Player %d requested vehicle state - returning %d vehicles'):format(source, #globalSpawnedVehicles))
-        end
         return globalSpawnedVehicles
     end)
-end)
 
-if not callbackSuccess then
-    print('^1[Vehicle Showroom] ERROR: Failed to register getVehicleState callback^7')
-end
-
--- Callback para iniciar prueba de vehículo usando ox_lib
-local testDriveCallbackSuccess = pcall(function()
+    -- Callback para iniciar prueba de vehículo usando ox_lib
     lib.callback.register('vehicleShowroom:startTestDrive', function(source, vehicleModel)
         local src = source
         local Player = QBCore.Functions.GetPlayer(src)
@@ -308,14 +259,8 @@ local testDriveCallbackSuccess = pcall(function()
         
         return true, 'Prueba iniciada correctamente'
     end)
-end)
 
-if not testDriveCallbackSuccess then
-    print('^1[Vehicle Showroom] ERROR: Failed to register startTestDrive callback^7')
-end
-
--- Callback para comprar vehículo usando ox_lib
-local buyCallbackSuccess = pcall(function()
+    -- Callback para comprar vehículo usando ox_lib
     lib.callback.register('vehicleShowroom:buyVehicle', function(source, vehicleData)
         local src = source
         local Player = QBCore.Functions.GetPlayer(src)
@@ -416,11 +361,9 @@ local buyCallbackSuccess = pcall(function()
             return false, 'Error al procesar la compra. Dinero devuelto.'
         end
     end)
+    
+    print('^2[Vehicle Showroom] ^7Callbacks registrados correctamente')
 end)
-
-if not buyCallbackSuccess then
-    print('^1[Vehicle Showroom] ERROR: Failed to register buyVehicle callback^7')
-end
 
 -- Event para finalizar prueba de vehículo
 RegisterNetEvent('vehicleShowroom:endTestDrive', function()
@@ -574,25 +517,6 @@ QBCore.Commands.Add('endtestdrive', 'Finalizar prueba de vehículo de un jugador
     TriggerEvent('vehicleShowroom:forceEndTestDrive', source, targetId)
 end)
 
--- Comando de debug para verificar callbacks
-QBCore.Commands.Add('debugshowroom', 'Debug del showroom', {}, false, function(source)
-    local Player = QBCore.Functions.GetPlayer(source)
-    if not QBCore.Functions.HasPermission(source, 'admin') then
-        TriggerClientEvent('QBCore:Notify', source, 'No tienes permisos para usar este comando', 'error')
-        return
-    end
-    
-    print('=== SHOWROOM SERVER DEBUG ===')
-    print(('QBCore loaded: %s'):format(tostring(QBCore ~= nil)))
-    print(('ox_lib loaded: %s'):format(tostring(lib ~= nil)))
-    print(('Spawned vehicles: %d'):format(#globalSpawnedVehicles))
-    print(('Players near showroom: %d'):format(#playersNearShowroom))
-    print(('Active test drives: %d'):format(#testDriveData))
-    print('=============================')
-    
-    TriggerClientEvent('QBCore:Notify', source, 'Debug info printed to server console', 'success')
-end)
-
 -- Thread principal para verificar jugadores cerca del showroom
 CreateThread(function()
     while true do
@@ -625,23 +549,6 @@ CreateThread(function()
     end
 end)
 
--- Verificar callbacks al cargar
-CreateThread(function()
-    Wait(5000) -- Esperar 5 segundos después del inicio
-    
-    local callbacksWorking = true
-    
-    -- Verificar si los callbacks están registrados
-    if not lib.callback then
-        print('^1[Vehicle Showroom] ERROR: ox_lib callback system not available^7')
-        callbacksWorking = false
-    end
-    
-    if callbacksWorking then
-        print('^2[Vehicle Showroom] ^7Servidor cargado correctamente - Callbacks registrados')
-        print('^3[Vehicle Showroom] ^7Sistema anti-duplicación activado')
-        print('^3[Vehicle Showroom] ^7Vehículos configurados: ^2' .. #Config.Vehicles)
-    else
-        print('^1[Vehicle Showroom] ^7ERROR: Callbacks no pudieron registrarse - Revisa ox_lib^7')
-    end
-end)
+print('^2[Vehicle Showroom] ^7Servidor cargado correctamente - HOTFIX aplicado')
+print('^3[Vehicle Showroom] ^7Sistema anti-duplicación activado')
+print('^3[Vehicle Showroom] ^7Vehículos configurados: ^2' .. #Config.Vehicles)
