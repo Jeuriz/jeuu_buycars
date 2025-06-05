@@ -1,9 +1,9 @@
 local QBCore = exports['qb-core']:GetCoreObject()
-local spawnedVehicles = {}
 local testDriveVehicle = nil
 local testDriveActive = false
 local testDriveThread = nil
-local vehicleStates = {} -- Estado de cada vehículo (spawneado/no spawneado)
+local showroomVehicles = {} -- Vehículos recibidos del servidor
+local vehicleTargets = {} -- Targets configurados
 local isInShowroomArea = false
 
 -- Cache usando ox_lib
@@ -13,6 +13,10 @@ local playerCache = {
     vehicle = 0,
     lastUpdate = 0
 }
+
+-- Declaración forward de funciones
+local ClearVehicleTargets
+local SetupVehicleTargets
 
 -- Función para actualizar cache del jugador
 local function UpdatePlayerCache()
@@ -70,42 +74,47 @@ local function DrawText3D(coords, text, scale, font, r, g, b, a)
     end
 end
 
--- Función para mostrar información 3D del vehículo
+-- Función para mostrar información 3D del vehículo (sincronizada)
 local function ShowVehicle3DText()
     UpdatePlayerCache()
     
-    for i, state in pairs(vehicleStates) do
-        if state.spawned and state.entity and DoesEntityExist(state.entity) then
-            local vehCoords = GetEntityCoords(state.entity)
-            local distance = #(playerCache.coords - vehCoords)
+    for i, vehicleInfo in pairs(showroomVehicles) do
+        if vehicleInfo and vehicleInfo.netId then
+            -- Obtener entidad del network ID
+            local entity = NetworkGetEntityFromNetworkId(vehicleInfo.netId)
             
-            if distance <= Config.Text3D.distance then
-                local textCoords = vector3(vehCoords.x, vehCoords.y, vehCoords.z + Config.Text3D.offsetZ)
-                local priceCoords = vector3(vehCoords.x, vehCoords.y, vehCoords.z + Config.Text3D.offsetZ - 0.3)
+            if DoesEntityExist(entity) then
+                local vehCoords = GetEntityCoords(entity)
+                local distance = #(playerCache.coords - vehCoords)
                 
-                -- Mostrar nombre del vehículo
-                DrawText3D(
-                    textCoords,
-                    state.data.label,
-                    Config.Text3D.scale,
-                    Config.Text3D.font,
-                    Config.Text3D.nameColor.r,
-                    Config.Text3D.nameColor.g,
-                    Config.Text3D.nameColor.b,
-                    255
-                )
-                
-                -- Mostrar precio en verde
-                DrawText3D(
-                    priceCoords,
-                    FormatPrice(state.data.price),
-                    Config.Text3D.scale * 0.8,
-                    Config.Text3D.font,
-                    Config.Text3D.priceColor.r,
-                    Config.Text3D.priceColor.g,
-                    Config.Text3D.priceColor.b,
-                    255
-                )
+                if distance <= Config.Text3D.distance then
+                    local textCoords = vector3(vehCoords.x, vehCoords.y, vehCoords.z + Config.Text3D.offsetZ)
+                    local priceCoords = vector3(vehCoords.x, vehCoords.y, vehCoords.z + Config.Text3D.offsetZ - 0.3)
+                    
+                    -- Mostrar nombre del vehículo
+                    DrawText3D(
+                        textCoords,
+                        vehicleInfo.data.label,
+                        Config.Text3D.scale,
+                        Config.Text3D.font,
+                        Config.Text3D.nameColor.r,
+                        Config.Text3D.nameColor.g,
+                        Config.Text3D.nameColor.b,
+                        255
+                    )
+                    
+                    -- Mostrar precio en verde
+                    DrawText3D(
+                        priceCoords,
+                        FormatPrice(vehicleInfo.data.price),
+                        Config.Text3D.scale * 0.8,
+                        Config.Text3D.font,
+                        Config.Text3D.priceColor.r,
+                        Config.Text3D.priceColor.g,
+                        Config.Text3D.priceColor.b,
+                        255
+                    )
+                end
             end
         end
     end
@@ -226,124 +235,64 @@ local function OpenPurchaseShop(vehicleData)
     lib.showContext('vehicle_purchase')
 end
 
--- Función para spawnar un vehículo específico con cache
-local function SpawnVehicle(index, vehicleData)
-    if vehicleStates[index] and vehicleStates[index].spawned then
-        return -- Ya está spawneado
+-- Función para limpiar targets de vehículos
+ClearVehicleTargets = function()
+    for i, entity in pairs(vehicleTargets) do
+        if DoesEntityExist(entity) then
+            exports.ox_target:removeLocalEntity(entity)
+        end
     end
+    vehicleTargets = {}
     
     if Config.Debug then
-        print(('Spawning vehicle: %s at %s'):format(vehicleData.model, vehicleData.coords))
+        print('Cleared all vehicle targets')
     end
-    
-    -- Usar RequestModel para optimizar carga
-    local hash = GetHashKey(vehicleData.model)
-    if not IsModelInCdimage(hash) or not IsModelAVehicle(hash) then
-        if Config.Debug then
-            print(('Invalid vehicle model: %s'):format(vehicleData.model))
-        end
-        return
-    end
-    
-    lib.requestModel(hash, 10000) -- 10 segundos timeout
-    
-    QBCore.Functions.SpawnVehicle(vehicleData.model, function(veh)
-        if not DoesEntityExist(veh) then
-            SetModelAsNoLongerNeeded(hash)
-            return
-        end
-        
-        -- Configurar posición y propiedades básicas
-        SetEntityCoords(veh, vehicleData.coords.x, vehicleData.coords.y, vehicleData.coords.z)
-        SetEntityHeading(veh, vehicleData.coords.w)
-        FreezeEntityPosition(veh, true)
-        SetEntityInvincible(veh, true)
-        SetVehicleDoorsLocked(veh, 2)
-        SetVehicleEngineOn(veh, false, true, true)
-        SetVehicleNumberPlateText(veh, 'SHOWROOM')
-        
-        -- Configurar modificaciones del vehículo
-        SetVehicleModKit(veh, 0)
-        SetVehicleWheelType(veh, 7) -- Sport wheels
-        SetVehicleMod(veh, 11, 3, false) -- Engine
-        SetVehicleMod(veh, 12, 2, false) -- Brakes
-        SetVehicleMod(veh, 13, 2, false) -- Transmission
-        
-        -- Configurar propiedades visuales
-        SetVehicleWindowTint(veh, 1) -- Tintado ligero
-        SetVehicleColours(veh, 0, 0) -- Negro metálico
-        
-        -- Añadir target options optimizadas
-        exports.ox_target:addLocalEntity(veh, {
-            {
-                name = 'test_drive_' .. index,
-                icon = 'fas fa-car',
-                label = ('🚗 Probar %s'):format(vehicleData.label),
-                distance = 3.0,
-                onSelect = function()
-                    StartTestDrive(vehicleData.model)
-                end
-            },
-            {
-                name = 'buy_vehicle_' .. index,
-                icon = 'fas fa-dollar-sign',
-                label = ('💰 Comprar %s'):format(FormatPrice(vehicleData.price)),
-                distance = 3.0,
-                onSelect = function()
-                    OpenPurchaseShop(vehicleData)
-                end
-            }
-        })
-        
-        -- Guardar referencia del vehículo con cache
-        vehicleStates[index] = {
-            spawned = true,
-            entity = veh,
-            data = vehicleData,
-            lastHealthCheck = GetGameTimer()
-        }
-        
-        spawnedVehicles[#spawnedVehicles + 1] = veh
-        
-        -- Liberar modelo de la memoria
-        SetModelAsNoLongerNeeded(hash)
-        
-    end, vehicleData.coords, true)
 end
 
--- Función para despawnar un vehículo específico
-local function DespawnVehicle(index)
-    if not vehicleStates[index] or not vehicleStates[index].spawned then
-        return -- No está spawneado
-    end
+-- Función para configurar targets de vehículos sincronizados
+SetupVehicleTargets = function()
+    -- Limpiar targets existentes
+    ClearVehicleTargets()
     
-    local veh = vehicleStates[index].entity
-    
-    if DoesEntityExist(veh) then
-        exports.ox_target:removeLocalEntity(veh)
-        DeleteEntity(veh)
-        
-        -- Remover de la lista de vehículos spawneados
-        for i, spawnedVeh in ipairs(spawnedVehicles) do
-            if spawnedVeh == veh then
-                table.remove(spawnedVehicles, i)
-                break
+    for i, vehicleInfo in pairs(showroomVehicles) do
+        if vehicleInfo and vehicleInfo.netId then
+            local entity = NetworkGetEntityFromNetworkId(vehicleInfo.netId)
+            
+            if DoesEntityExist(entity) then
+                -- Configurar targets para este vehículo
+                exports.ox_target:addLocalEntity(entity, {
+                    {
+                        name = 'test_drive_' .. i,
+                        icon = 'fas fa-car',
+                        label = ('🚗 Probar %s'):format(vehicleInfo.data.label),
+                        distance = 3.0,
+                        onSelect = function()
+                            StartTestDrive(vehicleInfo.data.model)
+                        end
+                    },
+                    {
+                        name = 'buy_vehicle_' .. i,
+                        icon = 'fas fa-dollar-sign',
+                        label = ('💰 Comprar %s'):format(FormatPrice(vehicleInfo.data.price)),
+                        distance = 3.0,
+                        onSelect = function()
+                            OpenPurchaseShop(vehicleInfo.data)
+                        end
+                    }
+                })
+                
+                -- Guardar referencia del target
+                vehicleTargets[i] = entity
+                
+                if Config.Debug then
+                    print(('Configured targets for vehicle %s (NetID: %d)'):format(vehicleInfo.data.model, vehicleInfo.netId))
+                end
             end
         end
-        
-        if Config.Debug then
-            print(('Despawned vehicle: %s'):format(vehicleStates[index].data.model))
-        end
     end
-    
-    vehicleStates[index] = {
-        spawned = false,
-        entity = nil,
-        data = vehicleStates[index].data
-    }
 end
 
--- Función para verificar si el jugador está cerca del showroom con cache
+-- Función para verificar si el jugador está cerca del showroom
 local function IsPlayerNearShowroom()
     UpdatePlayerCache()
     
@@ -357,80 +306,60 @@ local function IsPlayerNearShowroom()
     return false
 end
 
--- Función para manejar spawning por distancia optimizada
-local function HandleDistanceSpawning()
-    UpdatePlayerCache()
-    
-    for i, vehicleData in ipairs(Config.Vehicles) do
-        local distance = #(playerCache.coords - vector3(vehicleData.coords.x, vehicleData.coords.y, vehicleData.coords.z))
-        
-        if distance <= Config.SpawnDistance then
-            -- Spawnar si no está spawneado
-            if not vehicleStates[i] or not vehicleStates[i].spawned then
-                SpawnVehicle(i, vehicleData)
-            end
-        elseif distance >= Config.DespawnDistance then
-            -- Despawnar si está spawneado
-            if vehicleStates[i] and vehicleStates[i].spawned then
-                DespawnVehicle(i)
-            end
-        end
-    end
-end
-
--- Función para limpiar todos los vehículos spawneados
-local function CleanupAllVehicles()
-    for i = 1, #Config.Vehicles do
-        DespawnVehicle(i)
-    end
-    spawnedVehicles = {}
-    vehicleStates = {}
-end
-
--- Función para spawnar todos los vehículos (para comando de admin)
-local function SpawnAllVehicles()
-    for i, vehicleData in ipairs(Config.Vehicles) do
-        SpawnVehicle(i, vehicleData)
-    end
-end
-
--- Función para refrescar el showroom después de regresar de prueba
-local function RefreshShowroomAfterTestDrive()
-    if Config.Debug then
-        print('Refreshing showroom after test drive...')
-    end
-    
-    -- Forzar actualización del cache
-    ForceUpdatePlayerCache()
-    
-    -- Esperar un momento para que el teletransporte se complete
-    CreateThread(function()
-        Wait(1000) -- Esperar 1 segundo
-        
-        -- Actualizar estado del área del showroom
-        isInShowroomArea = IsPlayerNearShowroom()
-        
-        if Config.Debug then
-            print(('Player is near showroom: %s'):format(tostring(isInShowroomArea)))
-        end
-        
-        -- Si está en el área del showroom, forzar spawning
-        if isInShowroomArea then
-            HandleDistanceSpawning()
+-- Función para sincronizar estado con el servidor al entrar
+local function SyncWithServer()
+    lib.callback('vehicleShowroom:getVehicleState', false, function(serverVehicles)
+        if serverVehicles and next(serverVehicles) ~= nil then
+            showroomVehicles = serverVehicles
             
-            -- Notificación de debug
-            if Config.Debug then
-                lib.notify({
-                    title = 'Showroom',
-                    description = 'Vehículos recargados después de la prueba',
-                    type = 'inform'
-                })
-            end
+            -- Esperar un momento para que las entidades se sincronicen
+            CreateThread(function()
+                Wait(2000) -- Esperar 2 segundos
+                SetupVehicleTargets()
+                
+                if Config.Debug then
+                    print(('Synced with server - received %d vehicles'):format(table.getn(serverVehicles)))
+                end
+            end)
+        else
+            showroomVehicles = {}
+            ClearVehicleTargets()
         end
     end)
 end
 
 -- Events del cliente
+RegisterNetEvent('vehicleShowroom:vehiclesSpawned', function(serverVehicles)
+    showroomVehicles = serverVehicles
+    
+    -- Configurar targets después de un breve delay para sincronización
+    CreateThread(function()
+        Wait(2000) -- Esperar 2 segundos para que las entidades se sincronicen
+        SetupVehicleTargets()
+        
+        if Config.Debug then
+            lib.notify({
+                title = 'Showroom',
+                description = Config.Notifications.showroomEntered,
+                type = 'inform'
+            })
+        end
+    end)
+end)
+
+RegisterNetEvent('vehicleShowroom:vehiclesDespawned', function()
+    ClearVehicleTargets()
+    showroomVehicles = {}
+    
+    if Config.Debug then
+        lib.notify({
+            title = 'Showroom',
+            description = Config.Notifications.showroomExited,
+            type = 'inform'
+        })
+    end
+end)
+
 RegisterNetEvent('vehicleShowroom:startTestDriveClient', function(vehicleModel, routingBucket)
     -- Crear efecto de fade
     DoScreenFadeOut(1000)
@@ -520,8 +449,11 @@ RegisterNetEvent('vehicleShowroom:endTestDriveClient', function(originalCoords)
     -- Fade in
     DoScreenFadeIn(1000)
     
-    -- Refrescar el showroom después del teletransporte
-    RefreshShowroomAfterTestDrive()
+    -- Sincronizar estado con el servidor después del teletransporte
+    CreateThread(function()
+        Wait(2000) -- Esperar a que el teletransporte se complete
+        SyncWithServer()
+    end)
 end)
 
 -- Evento para mostrar confirmación de compra
@@ -538,20 +470,9 @@ end)
 CreateThread(function()
     Wait(2500) -- Esperar a que cargue todo
     
-    -- Inicializar estados de vehículos
-    for i, vehicleData in ipairs(Config.Vehicles) do
-        vehicleStates[i] = {
-            spawned = false,
-            entity = nil,
-            data = vehicleData
-        }
-    end
-    
     if Config.Debug then
         print('^2[Vehicle Showroom] ^7Cliente cargado correctamente')
-        print('^3[Vehicle Showroom] ^7Sistema de spawning por distancia activado')
-        print('^3[Vehicle Showroom] ^7Distancia de spawn: ^2' .. Config.SpawnDistance .. 'm')
-        print('^3[Vehicle Showroom] ^7Distancia de despawn: ^2' .. Config.DespawnDistance .. 'm')
+        print('^3[Vehicle Showroom] ^7Sistema sincronizado con servidor activado')
     end
 end)
 
@@ -559,7 +480,7 @@ end)
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         EndTestDrive()
-        CleanupAllVehicles()
+        ClearVehicleTargets()
         lib.hideTextUI()
         
         -- Limpiar thread si existe
@@ -570,36 +491,19 @@ AddEventHandler('onResourceStop', function(resourceName)
     end
 end)
 
--- Thread principal para monitoreo de distancia optimizado
+-- Thread para verificar si el jugador está en el área del showroom
 CreateThread(function()
     while true do
-        Wait(Config.CheckInterval)
+        Wait(3000) -- Verificar cada 3 segundos
         
-        if not testDriveActive then -- Solo verificar si no está en prueba de vehículo
+        if not testDriveActive then
             local wasInArea = isInShowroomArea
             isInShowroomArea = IsPlayerNearShowroom()
             
-            -- Notificar entrada/salida del área del showroom
+            -- Si entró al área, sincronizar con el servidor
             if isInShowroomArea and not wasInArea then
-                if Config.Debug then
-                    lib.notify({
-                        title = 'Showroom',
-                        description = Config.Notifications.showroomEntered,
-                        type = 'inform'
-                    })
-                end
-            elseif not isInShowroomArea and wasInArea then
-                if Config.Debug then
-                    lib.notify({
-                        title = 'Showroom',
-                        description = Config.Notifications.showroomExited,
-                        type = 'inform'
-                    })
-                end
+                SyncWithServer()
             end
-            
-            -- Manejar spawning por distancia
-            HandleDistanceSpawning()
         end
     end
 end)
@@ -609,7 +513,7 @@ CreateThread(function()
     while true do
         Wait(0) -- Ejecutar cada frame para texto suave
         
-        if isInShowroomArea and not testDriveActive then
+        if isInShowroomArea and not testDriveActive and next(showroomVehicles) ~= nil then
             ShowVehicle3DText()
         else
             Wait(500) -- Reducir frecuencia cuando no está en el área
@@ -617,31 +521,7 @@ CreateThread(function()
     end
 end)
 
--- Thread para mantenimiento de vehículos optimizado
-CreateThread(function()
-    while true do
-        Wait(5000) -- Verificar cada 5 segundos
-        
-        local currentTime = GetGameTimer()
-        
-        for i, state in pairs(vehicleStates) do
-            if state.spawned and state.entity and DoesEntityExist(state.entity) then
-                -- Solo verificar salud cada 5 segundos por vehículo
-                if currentTime - state.lastHealthCheck > 5000 then
-                    local veh = state.entity
-                    SetEntityHealth(veh, 1000)
-                    SetVehicleEngineHealth(veh, 1000.0)
-                    SetVehicleBodyHealth(veh, 1000.0)
-                    SetVehiclePetrolTankHealth(veh, 1000.0)
-                    
-                    state.lastHealthCheck = currentTime
-                end
-            end
-        end
-    end
-end)
-
--- Thread adicional para monitorear prueba de vehículo optimizado
+-- Thread para monitorear prueba de vehículo optimizado
 CreateThread(function()
     while true do
         Wait(500) -- Verificar cada medio segundo
