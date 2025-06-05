@@ -1,19 +1,22 @@
 local QBCore = exports['qb-core']:GetCoreObject()
 local testDriveData = {}
 
+-- Sistema global de vehículos spawneados (sincronizado)
+local globalSpawnedVehicles = {}
+local playersNearShowroom = {}
+local lastDistanceCheck = 0
+
 -- Función para obtener un routing bucket libre
 local function GetFreeRoutingBucket()
-    -- Si no hay soporte para routing buckets, devolver 0
     if not GetPlayerRoutingBucket or not SetPlayerRoutingBucket then
         return 0
     end
     
     local bucket = math.random(1000, 9999)
     
-    -- Verificar que el bucket no esté en uso
     for _, data in pairs(testDriveData) do
         if data.bucket == bucket then
-            return GetFreeRoutingBucket() -- Recursivo hasta encontrar uno libre
+            return GetFreeRoutingBucket()
         end
     end
     
@@ -29,6 +32,158 @@ local function IsValidVehicle(vehicleModel)
     end
     return false, nil
 end
+
+-- Función para verificar si algún jugador está cerca del showroom
+local function CheckPlayersNearShowroom()
+    local currentTime = GetGameTimer()
+    
+    -- Solo verificar cada 2 segundos para optimización
+    if currentTime - lastDistanceCheck < 2000 then
+        return
+    end
+    
+    lastDistanceCheck = currentTime
+    local previousPlayersNear = {}
+    
+    -- Copiar estado anterior
+    for src, _ in pairs(playersNearShowroom) do
+        previousPlayersNear[src] = true
+    end
+    
+    -- Limpiar lista actual
+    playersNearShowroom = {}
+    
+    -- Verificar cada jugador conectado
+    local players = QBCore.Functions.GetPlayers()
+    
+    for _, src in ipairs(players) do
+        local Player = QBCore.Functions.GetPlayer(src)
+        if Player then
+            local ped = GetPlayerPed(src)
+            if ped and ped ~= 0 then
+                local coords = GetEntityCoords(ped)
+                
+                -- Verificar distancia a cualquier vehículo del showroom
+                for i, vehicleData in ipairs(Config.Vehicles) do
+                    local distance = #(coords - vector3(vehicleData.coords.x, vehicleData.coords.y, vehicleData.coords.z))
+                    
+                    if distance <= Config.SpawnDistance then
+                        playersNearShowroom[src] = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Verificar si hay cambios en el estado del showroom
+    local hasPlayersNow = next(playersNearShowroom) ~= nil
+    local hadPlayersBefore = next(previousPlayersNear) ~= nil
+    
+    if hasPlayersNow and not hadPlayersBefore then
+        -- Primeros jugadores llegaron - spawnear vehículos
+        SpawnAllShowroomVehicles()
+        
+        if Config.Debug then
+            print('[Showroom] Players entered area - spawning vehicles')
+        end
+        
+    elseif not hasPlayersNow and hadPlayersBefore then
+        -- Todos los jugadores se fueron - despawnear vehículos
+        DespawnAllShowroomVehicles()
+        
+        if Config.Debug then
+            print('[Showroom] All players left area - despawning vehicles')
+        end
+    end
+end
+
+-- Función para spawnear todos los vehículos del showroom
+function SpawnAllShowroomVehicles()
+    if next(globalSpawnedVehicles) ~= nil then
+        return -- Ya están spawneados
+    end
+    
+    for i, vehicleData in ipairs(Config.Vehicles) do
+        -- Crear el vehículo en el servidor (sin verificación de modelo - ya está en config)
+        local hash = GetHashKey(vehicleData.model)
+        
+        local vehicle = CreateVehicle(
+            hash,
+            vehicleData.coords.x,
+            vehicleData.coords.y,
+            vehicleData.coords.z,
+            vehicleData.coords.w,
+            true,  -- networked
+            false  -- script vehicle
+        )
+        
+        if DoesEntityExist(vehicle) then
+            -- Configurar propiedades del vehículo
+            SetEntityInvincible(vehicle, true)
+            FreezeEntityPosition(vehicle, true)
+            SetVehicleDoorsLocked(vehicle, 2)
+            SetVehicleEngineOn(vehicle, false, true, true)
+            SetVehicleNumberPlateText(vehicle, 'SHOWROOM')
+            
+            -- Configurar modificaciones
+            SetVehicleModKit(vehicle, 0)
+            SetVehicleWheelType(vehicle, 7)
+            SetVehicleMod(vehicle, 11, 3, false)
+            SetVehicleMod(vehicle, 12, 2, false)
+            SetVehicleMod(vehicle, 13, 2, false)
+            SetVehicleWindowTint(vehicle, 1)
+            SetVehicleColours(vehicle, 0, 0)
+            
+            -- Guardar referencia global
+            globalSpawnedVehicles[i] = {
+                entity = vehicle,
+                netId = NetworkGetNetworkIdFromEntity(vehicle),
+                data = vehicleData
+            }
+            
+            if Config.Debug then
+                print(('Spawned vehicle %s (NetID: %d)'):format(vehicleData.model, NetworkGetNetworkIdFromEntity(vehicle)))
+            end
+        else
+            if Config.Debug then
+                print(('Failed to spawn vehicle: %s'):format(vehicleData.model))
+            end
+        end
+    end
+    
+    -- Notificar a todos los clientes que los vehículos están listos
+    TriggerClientEvent('vehicleShowroom:vehiclesSpawned', -1, globalSpawnedVehicles)
+end
+
+-- Función para despawnear todos los vehículos del showroom
+function DespawnAllShowroomVehicles()
+    if next(globalSpawnedVehicles) == nil then
+        return -- No hay vehículos spawneados
+    end
+    
+    -- Notificar a los clientes antes de eliminar
+    TriggerClientEvent('vehicleShowroom:vehiclesDespawned', -1)
+    
+    -- Eliminar vehículos del servidor
+    for i, vehicleInfo in pairs(globalSpawnedVehicles) do
+        if DoesEntityExist(vehicleInfo.entity) then
+            DeleteEntity(vehicleInfo.entity)
+            
+            if Config.Debug then
+                print(('Despawned vehicle %s (NetID: %d)'):format(vehicleInfo.data.model, vehicleInfo.netId))
+            end
+        end
+    end
+    
+    -- Limpiar lista global
+    globalSpawnedVehicles = {}
+end
+
+-- Callback para obtener estado actual de vehículos
+lib.callback.register('vehicleShowroom:getVehicleState', function(source)
+    return globalSpawnedVehicles
+end)
 
 -- Callback para iniciar prueba de vehículo usando ox_lib
 lib.callback.register('vehicleShowroom:startTestDrive', function(source, vehicleModel)
@@ -60,12 +215,10 @@ lib.callback.register('vehicleShowroom:startTestDrive', function(source, vehicle
     local originalBucket = 0
     local useRoutingBucket = false
     
-    -- Verificar si las funciones de routing bucket están disponibles
     if GetPlayerRoutingBucket and SetPlayerRoutingBucket then
         useRoutingBucket = true
         bucket = GetFreeRoutingBucket()
         originalBucket = GetPlayerRoutingBucket(src)
-        -- Cambiar routing bucket
         SetPlayerRoutingBucket(src, bucket)
     end
     
@@ -199,71 +352,6 @@ lib.callback.register('vehicleShowroom:buyVehicle', function(source, vehicleData
     end
 end)
 
--- Event para iniciar prueba de vehículo
-RegisterNetEvent('vehicleShowroom:startTestDrive', function(vehicleModel)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    
-    if not Player then return end
-    
-    -- Verificar si ya está en prueba
-    if testDriveData[src] then
-        TriggerClientEvent('QBCore:Notify', src, Config.Notifications.alreadyTesting, 'error')
-        return
-    end
-    
-    -- Verificar que el vehículo sea válido
-    local isValid, vehicleConfig = IsValidVehicle(vehicleModel)
-    if not isValid then
-        TriggerClientEvent('QBCore:Notify', src, Config.Notifications.invalidVehicle, 'error')
-        return
-    end
-    
-    -- Obtener coordenadas actuales
-    local ped = GetPlayerPed(src)
-    local coords = GetEntityCoords(ped)
-    local heading = GetEntityHeading(ped)
-    
-    -- Crear nuevo routing bucket (solo si la función existe)
-    local bucket = 0
-    local originalBucket = 0
-    local useRoutingBucket = false
-    
-    -- Verificar si las funciones de routing bucket están disponibles
-    if GetPlayerRoutingBucket and SetPlayerRoutingBucket then
-        useRoutingBucket = true
-        bucket = GetFreeRoutingBucket()
-        originalBucket = GetPlayerRoutingBucket(src)
-        -- Cambiar routing bucket
-        SetPlayerRoutingBucket(src, bucket)
-    end
-    
-    -- Guardar datos de la prueba
-    testDriveData[src] = {
-        originalBucket = originalBucket,
-        originalCoords = {x = coords.x, y = coords.y, z = coords.z, w = heading},
-        bucket = bucket,
-        vehicleModel = vehicleModel,
-        startTime = os.time(),
-        useRoutingBucket = useRoutingBucket
-    }
-    
-    -- Iniciar prueba en cliente
-    TriggerClientEvent('vehicleShowroom:startTestDriveClient', src, vehicleModel, bucket)
-    
-    if Config.Debug then
-        if useRoutingBucket then
-            print(('Player %s started test drive with %s in bucket %d'):format(src, vehicleModel, bucket))
-        else
-            print(('Player %s started test drive with %s (no routing bucket support)'):format(src, vehicleModel))
-        end
-    end
-    
-    -- Log para administradores
-    TriggerEvent('qb-log:server:CreateLog', 'vehicleshowroom', 'Test Drive Started', 'green', 
-        ('**%s** started test driving **%s**'):format(Player.PlayerData.name, vehicleConfig.label))
-end)
-
 -- Event para finalizar prueba de vehículo
 RegisterNetEvent('vehicleShowroom:endTestDrive', function()
     local src = source
@@ -286,106 +374,6 @@ RegisterNetEvent('vehicleShowroom:endTestDrive', function()
     
     -- Limpiar datos
     testDriveData[src] = nil
-end)
-
--- Event para comprar vehículo (ahora entrega ítem)
-RegisterNetEvent('vehicleShowroom:buyVehicle', function(vehicleData)
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    
-    if not Player then return end
-    
-    -- Verificar que el vehículo existe en la configuración
-    local vehicleExists = false
-    local vehicleConfig = nil
-    
-    for _, veh in ipairs(Config.Vehicles) do
-        if veh.model == vehicleData.model then
-            vehicleExists = true
-            vehicleConfig = veh
-            break
-        end
-    end
-    
-    if not vehicleExists then
-        TriggerClientEvent('QBCore:Notify', src, Config.Notifications.invalidVehicle, 'error')
-        return
-    end
-    
-    -- Verificar dinero en efectivo
-    local cash = Player.PlayerData.money['cash']
-    
-    if cash < vehicleData.price then
-        TriggerClientEvent('QBCore:Notify', src, Config.Notifications.notEnoughMoney, 'error')
-        return
-    end
-    
-    -- Verificar que el ítem existe en qb-core
-    local itemData = QBCore.Shared.Items[vehicleConfig.item]
-    if not itemData then
-        if Config.Debug then
-            print(('Item %s not found in QBCore.Shared.Items'):format(vehicleConfig.item))
-        end
-        TriggerClientEvent('QBCore:Notify', src, 'Error: Ítem del vehículo no configurado correctamente', 'error')
-        return
-    end
-    
-    -- Verificar espacio en inventario
-    local hasSpace = Player.Functions.GetItemByName(vehicleConfig.item)
-    if hasSpace then
-        TriggerClientEvent('QBCore:Notify', src, 'Ya tienes este vehículo en tu inventario', 'error')
-        return
-    end
-    
-    -- Verificar si el inventario tiene espacio
-    local totalWeight = 0
-    for _, item in pairs(Player.PlayerData.items) do
-        if item then
-            totalWeight = totalWeight + (item.weight * item.amount)
-        end
-    end
-    
-    if totalWeight + itemData.weight > Player.PlayerData.maxweight then
-        TriggerClientEvent('QBCore:Notify', src, 'No tienes espacio suficiente en el inventario', 'error')
-        return
-    end
-    
-    -- Remover dinero
-    Player.Functions.RemoveMoney('cash', vehicleData.price, 'vehicle-showroom-purchase')
-    
-    -- Generar metadata para el ítem del vehículo
-    local metadata = {
-        vehicle = vehicleData.model,
-        label = vehicleData.label,
-        category = vehicleData.category,
-        purchaseDate = os.date('%Y-%m-%d %H:%M:%S'),
-        buyer = Player.PlayerData.name,
-        citizenid = Player.PlayerData.citizenid
-    }
-    
-    -- Añadir ítem del vehículo al inventario
-    local itemAdded = Player.Functions.AddItem(vehicleConfig.item, 1, false, metadata)
-    
-    if itemAdded then
-        -- Notificar al cliente sobre la compra exitosa
-        TriggerClientEvent('vehicleShowroom:purchaseSuccess', src, vehicleData.label, vehicleData.price, vehicleConfig.item)
-        
-        if Config.Debug then
-            print(('Player %s bought %s for $%d (Item: %s)'):format(src, vehicleData.model, vehicleData.price, vehicleConfig.item))
-        end
-        
-        -- Log para administradores
-        TriggerEvent('qb-log:server:CreateLog', 'vehicleshowroom', 'Vehicle Purchase', 'blue', 
-            ('**%s** purchased **%s** for **$%d**'):format(Player.PlayerData.name, vehicleData.label, vehicleData.price))
-    else
-        -- Si falla al añadir el ítem, devolver el dinero
-        Player.Functions.AddMoney('cash', vehicleData.price, 'vehicle-showroom-refund')
-        TriggerClientEvent('QBCore:Notify', src, 'Error al procesar la compra. Dinero devuelto.', 'error')
-        
-        if Config.Debug then
-            print(('Failed to add item %s to player %s'):format(vehicleConfig.item, src))
-        end
-    end
 end)
 
 -- Event para forzar finalización de prueba (admin)
@@ -419,19 +407,50 @@ end)
 -- Cleanup al desconectar jugador
 AddEventHandler('playerDropped', function(reason)
     local src = source
+    
+    -- Limpiar datos de prueba
     if testDriveData[src] then
         if Config.Debug then
             print(('Player %s disconnected during test drive'):format(src))
         end
         testDriveData[src] = nil
     end
+    
+    -- Remover de la lista de jugadores cerca del showroom
+    if playersNearShowroom[src] then
+        playersNearShowroom[src] = nil
+        
+        -- Verificar si era el último jugador y despawnear vehículos si es necesario
+        CreateThread(function()
+            Wait(1000) -- Esperar un poco antes de verificar
+            CheckPlayersNearShowroom()
+        end)
+    end
 end)
 
--- Comando para administradores: teleportar a showroom
+-- Event para refrescar showroom (admin)
+RegisterNetEvent('vehicleShowroom:refreshShowroom', function()
+    local src = source
+    local Player = QBCore.Functions.GetPlayer(src)
+    
+    if not Player or not QBCore.Functions.HasPermission(src, 'admin') then
+        return
+    end
+    
+    -- Forzar despawn y respawn
+    DespawnAllShowroomVehicles()
+    Wait(1000)
+    
+    -- Verificar jugadores cerca y respawnear si es necesario
+    CheckPlayersNearShowroom()
+    
+    TriggerClientEvent('QBCore:Notify', src, Config.Notifications.showroomRefresh, 'success')
+end)
+
+-- Comandos para administradores
 QBCore.Commands.Add('showroom', 'Teleportar al showroom', {}, false, function(source)
     local Player = QBCore.Functions.GetPlayer(source)
     if Player.PlayerData.job.name == 'police' or QBCore.Functions.HasPermission(source, 'admin') then
-        -- Usar las coordenadas del primer vehículo del showroom
         local coords = Config.Vehicles[1].coords
         TriggerClientEvent('QBCore:Command:TeleportToCoords', source, coords.x, coords.y, coords.z)
     else
@@ -439,7 +458,10 @@ QBCore.Commands.Add('showroom', 'Teleportar al showroom', {}, false, function(so
     end
 end)
 
--- Comando para ver quién está en prueba de vehículo
+QBCore.Commands.Add('refreshshowroom', 'Refrescar vehículos del showroom', {}, false, function(source)
+    TriggerEvent('vehicleShowroom:refreshShowroom', source)
+end)
+
 QBCore.Commands.Add('testdrives', 'Ver jugadores en prueba de vehículo', {}, false, function(source)
     local Player = QBCore.Functions.GetPlayer(source)
     if not QBCore.Functions.HasPermission(source, 'admin') then
@@ -466,7 +488,6 @@ QBCore.Commands.Add('testdrives', 'Ver jugadores en prueba de vehículo', {}, fa
     end
 end)
 
--- Comando para finalizar prueba de un jugador específico
 QBCore.Commands.Add('endtestdrive', 'Finalizar prueba de vehículo de un jugador', {{name = 'id', help = 'ID del jugador'}}, true, function(source, args)
     local Player = QBCore.Functions.GetPlayer(source)
     if not QBCore.Functions.HasPermission(source, 'admin') then
@@ -481,6 +502,14 @@ QBCore.Commands.Add('endtestdrive', 'Finalizar prueba de vehículo de un jugador
     end
     
     TriggerEvent('vehicleShowroom:forceEndTestDrive', source, targetId)
+end)
+
+-- Thread principal para verificar jugadores cerca del showroom
+CreateThread(function()
+    while true do
+        Wait(2000) -- Verificar cada 2 segundos
+        CheckPlayersNearShowroom()
+    end
 end)
 
 -- Función para limpiar pruebas colgadas (cada 10 minutos)
@@ -507,5 +536,6 @@ CreateThread(function()
     end
 end)
 
-print('^2[Vehicle Showroom] ^7Servidor cargado correctamente')
+print('^2[Vehicle Showroom] ^7Servidor cargado correctamente - HOTFIX aplicado')
+print('^3[Vehicle Showroom] ^7Sistema anti-duplicación activado')
 print('^3[Vehicle Showroom] ^7Vehículos configurados: ^2' .. #Config.Vehicles)
